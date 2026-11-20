@@ -27,6 +27,7 @@ Environment Variables:
         THREAD_ID_NSFW    Discord thread ID for `nsfw-furry-art`.
         THREAD_ID_MEME          Discord thread ID for `meme`.
         THREAD_ID_FURRY_MEME    Discord thread ID for `furry-meme`.
+        THREAD_ID_IRL           Discord thread ID for `irl`.
         THREAD_ID_TECH          Discord thread ID for `tech`.
         THREAD_ID_OTHER         Discord thread ID for `other`.
 
@@ -97,8 +98,12 @@ load_dotenv()
 
 CATEGORIES: dict[str, str] = {
     "sfw-furry-art": (
-        "Safe-for-work anthropomorphic/furry artwork, illustrations, fursuits, "
-        "or character designs without explicit sexual content."
+        "Safe-for-work anthropomorphic/furry artwork, illustrations, character designs, "
+        "or other drawn/virtual furry art without explicit sexual content."
+    ),
+    "irl": (
+        "Real-life fursuit, zentai, nude, gay, femboy, cosplay, or sexually suggestive "
+        "photos and videos featuring people in costumes or full-body coverings."
     ),
     "nsfw": (
         "Explicit, adult, sexually suggestive, or pornographic anthropomorphic/furry "
@@ -127,6 +132,7 @@ CATEGORY_COLORS: dict[str, int] = {
     "nsfw": 0xED4245,            # Crimson red
     "meme": 0xFEE75C,            # Warm yellow
     "furry-meme": 0xEB459E,      # Magenta
+    "irl": 0xE67E22,             # Orange
     "tech": 0x5865F2,            # Discord blurple
     "other": 0x95A5A6,           # Grey
 }
@@ -136,6 +142,7 @@ CATEGORY_THREAD_ENV_MAP: dict[str, str] = {
     "nsfw": "THREAD_ID_NSFW",
     "meme": "THREAD_ID_MEME",
     "furry-meme": "THREAD_ID_FURRY_MEME",
+    "irl": "THREAD_ID_IRL",
     "tech": "THREAD_ID_TECH",
     "other": "THREAD_ID_OTHER",
 }
