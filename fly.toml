@@ -1,0 +1,29 @@
+app = "reeeon-twitter-forwarder"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8000"
+  DB_PATH = "/data/likes.db"
+  PUBLIC_WEBHOOK_URL = "https://reeeon-twitter-forwarder.fly.dev/webhook/x"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+#[[mounts]]
+#  source = "likes_data"
+#  destination = "/data"
