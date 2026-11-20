@@ -19,8 +19,8 @@ Every liked post is classified into one of 6 Discord threads inside a single par
 | :--- | :--- | :--- |
 | `sfw-furry-art` | `THREAD_ID_SFW_FURRY` | Safe-for-work anthropomorphic/furry art, fursuits, or character designs. |
 | `nsfw-furry-art` | `THREAD_ID_NSFW` | Adult, sexually suggestive, or explicit anthropomorphic/furry art/media. |
-| `irl-porn` | `THREAD_ID_IRL_PORN` | Real-life sexually explicit photos/videos involving real humans. |
-| `meme` | `THREAD_ID_MEME` | Jokes, shitposts, reaction images/videos, humorous screenshots, or memes. |
+| `meme` | `THREAD_ID_MEME` | General non-furry jokes, shitposts, reaction images/videos, or memes. |
+| `furry-meme` | `THREAD_ID_FURRY_MEME` | Furry or anthropomorphic jokes, shitposts, reaction images/videos, comics, or memes. |
 | `tech` | `THREAD_ID_TECH` | Technology news, software, hardware, programming, AI, gadgets, cybersecurity, science, or engineering. |
 | `other` | `THREAD_ID_OTHER` | General news, commentary, general photography, or anything not covered above; also low-confidence fallbacks. |
 
@@ -32,11 +32,11 @@ If model confidence is below `CONFIDENCE_THRESHOLD` (default `0.55`) or media fa
 
 ### A. Discord Webhook & Thread IDs
 1. Create a parent text channel in your Discord server (e.g., `#x-likes`).
-2. Inside `#x-likes`, create **5 threads** (one for each category above).
+2. Inside `#x-likes`, create **6 threads** (one for each category above).
    * *Note: Mark NSFW threads/channel age-restricted as appropriate. Even if Discord auto-archives inactive threads later, posting via webhook automatically unarchives them.*
 3. Create **one** channel webhook:
    * Right-click the parent channel → **Edit Channel** → **Integrations** → **Webhooks** → **New Webhook** → **Copy Webhook URL** → save as `DISCORD_WEBHOOK_URL`.
-4. Copy the **5 Thread IDs**:
+4. Copy the **6 Thread IDs**:
    * Open Discord **User Settings** → **Advanced** → turn on **Developer Mode**.
    * Right-click each thread in the channel sidebar → **Copy Thread ID** → fill in `THREAD_ID_*` in `.env`.
 
@@ -80,10 +80,6 @@ The included Dockerfile runs the webhook server with Python 3.14 on port `8000`.
    ```bash
    fly apps create <app-name>
    fly volumes create likes_data --size 1 --region sin
-   ```
-4. Configure the runtime credentials as Fly secrets (use your actual values):
-   ```bash
-   fly secrets set GEMINI_API_KEY=... DISCORD_WEBHOOK_URL=... THREAD_ID_SFW_FURRY=... THREAD_ID_NSFW=... THREAD_ID_MEME=... THREAD_ID_TECH=... THREAD_ID_OTHER=... X_CONSUMER_SECRET=... X_USER_ID=...
    ```
 5. Deploy and check the public endpoints:
    ```bash

@@ -26,6 +26,7 @@ Environment Variables:
         THREAD_ID_SFW_FURRY     Discord thread ID for `sfw-furry-art`.
         THREAD_ID_NSFW    Discord thread ID for `nsfw-furry-art`.
         THREAD_ID_MEME          Discord thread ID for `meme`.
+        THREAD_ID_FURRY_MEME    Discord thread ID for `furry-meme`.
         THREAD_ID_TECH          Discord thread ID for `tech`.
         THREAD_ID_OTHER         Discord thread ID for `other`.
 
@@ -104,7 +105,12 @@ CATEGORIES: dict[str, str] = {
         "artwork or media."
     ),
     "meme": (
-        "Jokes, shitposts, reaction images/videos, humorous screenshots, or internet memes."
+        "General jokes, shitposts, reaction images/videos, humorous screenshots, or internet memes "
+        "that are not specifically furry or anthropomorphic."
+    ),
+    "furry-meme": (
+        "Humorous furry or anthropomorphic jokes, shitposts, reaction images/videos, "
+        "screenshots, comics, or internet memes."
     ),
     "tech": (
         "Technology news, software, hardware, programming, AI, gadgets, cybersecurity, "
@@ -120,6 +126,7 @@ CATEGORY_COLORS: dict[str, int] = {
     "sfw-furry-art": 0x3BA55D,   # Emerald green
     "nsfw": 0xED4245,            # Crimson red
     "meme": 0xFEE75C,            # Warm yellow
+    "furry-meme": 0xEB459E,      # Magenta
     "tech": 0x5865F2,            # Discord blurple
     "other": 0x95A5A6,           # Grey
 }
@@ -128,6 +135,7 @@ CATEGORY_THREAD_ENV_MAP: dict[str, str] = {
     "sfw-furry-art": "THREAD_ID_SFW_FURRY",
     "nsfw": "THREAD_ID_NSFW",
     "meme": "THREAD_ID_MEME",
+    "furry-meme": "THREAD_ID_FURRY_MEME",
     "tech": "THREAD_ID_TECH",
     "other": "THREAD_ID_OTHER",
 }
@@ -1070,7 +1078,7 @@ class TweetClassifier:
 # ---------------------------------------------------------------------------
 
 # DESIGN DECISION — Thread Routing & Webhook Architecture:
-# All 5 destination threads live inside the same parent Discord channel. Discord's Webhook API
+# All destination threads live inside the same parent Discord channel. Discord's Webhook API
 # allows a single channel-level webhook (`DISCORD_WEBHOOK_URL`) to post into any thread in that
 # parent channel simply by appending `?thread_id=<THREAD_ID>`, and Discord automatically unarchives
 # archived threads when a webhook message arrives. Using a single webhook URL parameterized per
@@ -1081,7 +1089,7 @@ class TweetClassifier:
 #   1. In Discord, open User Settings -> Advanced -> enable "Developer Mode".
 #   2. Right-click each target thread in the channel list (or click the thread header menu)
 #      and click "Copy Thread ID".
-#   3. Set THREAD_ID_SFW_FURRY, THREAD_ID_NSFW, THREAD_ID_IRL_PORN, THREAD_ID_MEME,
+#   3. Set THREAD_ID_SFW_FURRY, THREAD_ID_NSFW, THREAD_ID_MEME, THREAD_ID_FURRY_MEME,
 #      THREAD_ID_TECH, and THREAD_ID_OTHER in your environment or `.env` file.
 #
 # DESIGN DECISION — Video & GIF Playback in Discord:
@@ -1121,7 +1129,7 @@ def build_discord_webhook_payload(
     if tweet.user_profile_image_url.startswith(("https://", "http://")):
         author_obj["icon_url"] = tweet.user_profile_image_url
 
-    badge_text = f"`{classification.category}` ({classification.confidence:.0%}) • gemini-decision-1"
+    badge_text = f"`{classification.category}` ({classification.confidence:.0%} • classifier-261120)"
     if classification.fallback_reason:
         badge_text += f" *({classification.fallback_reason})*"
 
