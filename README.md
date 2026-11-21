@@ -13,7 +13,7 @@ X Archive (data/like.js)     ──┘     (likes.db)     (text + media URLs)   
 ```
 
 ### Categories
-Every liked post is classified into one of 7 Discord threads inside a single parent channel:
+Every liked post is classified into one of 7 category threads inside a single parent channel:
 
 | Category Label | Env Variable | Description |
 | :--- | :--- | :--- |
@@ -26,6 +26,9 @@ Every liked post is classified into one of 7 Discord threads inside a single par
 | `other` | `THREAD_ID_OTHER` | General news, commentary, general photography, or anything not covered above; also low-confidence fallbacks. |
 
 If model confidence is below `CONFIDENCE_THRESHOLD` (default `0.55`) or media fails to download, the post safely falls back to `other`.
+When `other` itself is the low-confidence primary choice, the classifier uses the model's second-most-likely category instead.
+The second category is accepted only when its confidence is at least `SECOND_CATEGORY_CONFIDENCE_THRESHOLD` (default `0.55`); otherwise the post remains in `other`.
+If tweet fetching fails, the tweet link is posted to a separate `failed-to-fetch` thread configured with `THREAD_ID_FAILED_TO_FETCH`.
 
 ---
 
@@ -33,11 +36,11 @@ If model confidence is below `CONFIDENCE_THRESHOLD` (default `0.55`) or media fa
 
 ### A. Discord Webhook & Thread IDs
 1. Create a parent text channel in your Discord server (e.g., `#x-likes`).
-2. Inside `#x-likes`, create **7 threads** (one for each category above).
+2. Inside `#x-likes`, create **8 threads** (one for each category above, plus a `failed-to-fetch` thread).
    * *Note: Mark NSFW threads/channel age-restricted as appropriate. Even if Discord auto-archives inactive threads later, posting via webhook automatically unarchives them.*
 3. Create **one** channel webhook:
    * Right-click the parent channel → **Edit Channel** → **Integrations** → **Webhooks** → **New Webhook** → **Copy Webhook URL** → save as `DISCORD_WEBHOOK_URL`.
-4. Copy the **7 Thread IDs**:
+4. Copy the **8 Thread IDs**:
    * Open Discord **User Settings** → **Advanced** → turn on **Developer Mode**.
    * Right-click each thread in the channel sidebar → **Copy Thread ID** → fill in `THREAD_ID_*` in `.env`.
 

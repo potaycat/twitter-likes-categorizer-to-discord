@@ -24,12 +24,13 @@ Environment Variables:
         GEMINI_API_KEY          Google AI Studio API key for `gemini-decision-1`.
         DISCORD_WEBHOOK_URL     Discord Incoming Webhook URL created on the parent channel.
         THREAD_ID_SFW_FURRY     Discord thread ID for `sfw-furry-art`.
-        THREAD_ID_NSFW    Discord thread ID for `nsfw-furry-art`.
+        THREAD_ID_NSFW          Discord thread ID for `nsfw-furry-art`.
         THREAD_ID_MEME          Discord thread ID for `meme`.
         THREAD_ID_FURRY_MEME    Discord thread ID for `furry-meme`.
         THREAD_ID_IRL           Discord thread ID for `irl`.
         THREAD_ID_TECH          Discord thread ID for `tech`.
         THREAD_ID_OTHER         Discord thread ID for `other`.
+        THREAD_ID_FAILED_TO_FETCH Discord thread ID for tweet-fetch failures.
 
     Required for X Activity API (`serve` and `subscribe`):
         X_CONSUMER_SECRET       X App Consumer Secret (API Key Secret) used for CRC HMAC-SHA256,
@@ -50,6 +51,9 @@ Environment Variables:
         DB_PATH                 SQLite file path for processed tweet deduplication (default: `likes.db`).
         CONFIDENCE_THRESHOLD    Minimum `gemini-decision-1` confidence [0.0–1.0] before falling
                                 back to `other` (default: `0.55`).
+        SECOND_CATEGORY_CONFIDENCE_THRESHOLD
+                                Minimum confidence for the second category before routing back
+                                to `other` (default: `0.55`).
         GEMINI_IMAGE_RESOLUTION Image token resolution for `gemini-decision-1`:
                                 `low`, `medium`, `high`, or `ultra_high` (default: `medium`).
         VXTWITTER_API_BASE      BetterTwitFix API base URL (default: `https://api.vxtwitter.com`).
@@ -96,13 +100,15 @@ load_dotenv()
 # Constants & Category Definitions
 # ---------------------------------------------------------------------------
 
+CLASSIFIER_VERSION = "classifier-261124"
+
 CATEGORIES: dict[str, str] = {
     "sfw-furry-art": (
         "Safe-for-work anthropomorphic/furry artwork, illustrations, character designs, "
         "or other drawn/virtual furry art without explicit sexual content."
     ),
     "irl": (
-        "Real-life fursuit, zentai, nude, gay, femboy, cosplay, or sexually suggestive "
+        "Real-life fursuit or just fursuit head, zentai, nude, gay, femboy, cosplay, or sexually suggestive "
         "photos and videos featuring people in costumes or full-body coverings."
     ),
     "nsfw": (
@@ -145,6 +151,7 @@ CATEGORY_THREAD_ENV_MAP: dict[str, str] = {
     "irl": "THREAD_ID_IRL",
     "tech": "THREAD_ID_TECH",
     "other": "THREAD_ID_OTHER",
+    "failed-to-fetch": "THREAD_ID_FAILED_TO_FETCH",
 }
 
 VALID_IMAGE_RESOLUTIONS = {"low", "medium", "high", "ultra_high"}
@@ -177,6 +184,7 @@ def setup_logging() -> None:
 class AppConfig:
     db_path: str
     confidence_threshold: float
+    second_category_confidence_threshold: float
     gemini_image_resolution: str
     vxtwitter_api_base: str
     import_delay_seconds: float
@@ -205,6 +213,18 @@ class AppConfig:
         if not (0.0 <= threshold <= 1.0):
             raise ValueError("CONFIDENCE_THRESHOLD must be between 0.0 and 1.0")
 
+        raw_second_threshold = os.getenv("SECOND_CATEGORY_CONFIDENCE_THRESHOLD", "0.55").strip()
+        try:
+            second_threshold = float(raw_second_threshold)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid SECOND_CATEGORY_CONFIDENCE_THRESHOLD={raw_second_threshold!r}"
+            ) from exc
+        if not (0.0 <= second_threshold <= 1.0):
+            raise ValueError(
+                "SECOND_CATEGORY_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0"
+            )
+
         resolution = os.getenv("GEMINI_IMAGE_RESOLUTION", "medium").strip().lower()
         if resolution not in VALID_IMAGE_RESOLUTIONS:
             raise ValueError(
@@ -231,6 +251,7 @@ class AppConfig:
         return cls(
             db_path=os.getenv("DB_PATH", "likes.db").strip() or "likes.db",
             confidence_threshold=threshold,
+            second_category_confidence_threshold=second_threshold,
             gemini_image_resolution=resolution,
             vxtwitter_api_base=(
                 os.getenv("VXTWITTER_API_BASE", "https://api.vxtwitter.com").strip().rstrip("/")
@@ -324,6 +345,7 @@ class LikeStore:
                     confidence   REAL NOT NULL,
                     status       TEXT NOT NULL,
                     tweet_url    TEXT NOT NULL DEFAULT '',
+                    classifier_version TEXT NOT NULL DEFAULT '',
                     processed_at TEXT NOT NULL
                 );
                 """
@@ -350,16 +372,25 @@ class LikeStore:
         confidence: float,
         status: str = "posted",
         tweet_url: str = "",
+        classifier_version: str = CLASSIFIER_VERSION,
     ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO processed_likes
-                    (tweet_id, category, confidence, status, tweet_url, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?);
+                    (tweet_id, category, confidence, status, tweet_url, classifier_version, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
                 """,
-                (tweet_id, category, confidence, status, tweet_url, now_iso),
+                (
+                    tweet_id,
+                    category,
+                    confidence,
+                    status,
+                    tweet_url,
+                    classifier_version,
+                    now_iso,
+                ),
             )
             conn.commit()
 
@@ -908,6 +939,7 @@ class TweetClassifier:
         self,
         api_key: str,
         confidence_threshold: float = 0.55,
+        second_category_confidence_threshold: float = 0.55,
         image_resolution: str = "medium",
     ) -> None:
         self.client = genai.Client(
@@ -915,6 +947,7 @@ class TweetClassifier:
             http_options={"api_version": "v1beta"},
         )
         self.confidence_threshold = confidence_threshold
+        self.second_category_confidence_threshold = second_category_confidence_threshold
         self.image_resolution = image_resolution
 
     @staticmethod
@@ -978,7 +1011,15 @@ class TweetClassifier:
                     "and between safe-for-work art vs sexually suggestive/explicit adult NSFW content."
                 ),
                 "criteria": CATEGORIES,
-            }
+            },
+            "second_post_category": {
+                "type": "choice",
+                "instructions": (
+                    "Select the second-most-likely category for this X post. "
+                    "Do not select 'other'; choose a category that the primary classification excluded."
+                ),
+                "criteria": {name: description for name, description in CATEGORIES.items() if name != "other"},
+            },
         }
 
         last_exc: Exception | None = None
@@ -1021,20 +1062,39 @@ class TweetClassifier:
                         fallback_reason="invalid_label",
                     )
 
-                if raw_choice != "other" and confidence < self.confidence_threshold:
-                    logger.info(
-                        "Tweet %s classified as %s with low confidence %.2f (< %.2f); routing to 'other'.",
-                        tweet.tweet_id,
-                        raw_choice,
-                        confidence,
-                        self.confidence_threshold,
-                    )
-                    return ClassificationResult(
-                        category="other",
-                        confidence=confidence,
-                        raw_choice=raw_choice,
-                        fallback_reason=f"low_confidence<{self.confidence_threshold:.2f}",
-                    )
+                if raw_choice == "other" and confidence < self.confidence_threshold:
+                    second_ans = answers.get("second_post_category")
+                    if second_ans is not None:
+                        second_choice = str(
+                            getattr(second_ans, "choice", None)
+                            or (second_ans.get("choice") if isinstance(second_ans, dict) else "")
+                        ).strip()
+                        second_raw_conf = (
+                            getattr(second_ans, "confidence", None)
+                            if getattr(second_ans, "confidence", None) is not None
+                            else (
+                                second_ans.get("confidence", 0.0)
+                                if isinstance(second_ans, dict)
+                                else 0.0
+                            )
+                        )
+                        second_confidence = float(second_raw_conf)
+
+                        if second_choice in CATEGORIES and second_choice != "other":
+                            if second_confidence >= self.second_category_confidence_threshold:
+                                return ClassificationResult(
+                                    category=second_choice,
+                                    confidence=second_confidence,
+                                    raw_choice=second_choice,
+                                    fallback_reason="",
+                                )
+                            
+                            return ClassificationResult(
+                                category="other",
+                                confidence=confidence,
+                                raw_choice="other",
+                                fallback_reason="",
+                            )
 
                 return ClassificationResult(
                     category=raw_choice,
@@ -1096,17 +1156,14 @@ class TweetClassifier:
 #   1. In Discord, open User Settings -> Advanced -> enable "Developer Mode".
 #   2. Right-click each target thread in the channel list (or click the thread header menu)
 #      and click "Copy Thread ID".
-#   3. Set THREAD_ID_SFW_FURRY, THREAD_ID_NSFW, THREAD_ID_MEME, THREAD_ID_FURRY_MEME,
-#      THREAD_ID_TECH, and THREAD_ID_OTHER in your environment or `.env` file.
+#   3. Set the THREAD_ID_* variables in your environment or `.env` file, including
+#      THREAD_ID_FAILED_TO_FETCH for fetch failures.
 #
 # DESIGN DECISION — Video & GIF Playback in Discord:
 # Discord ignores `embeds[].video` on incoming webhook payloads, and `embeds[].image` only renders
-# static images. Posting a `vxtwitter.com` link in `content` would cause Discord to unfurl a second,
-# duplicate text/author embed alongside our custom rich embed. Instead, when `media_extended`
-# contains `"video"` or `"gif"` streams, we place the direct `https://video.twimg.com/...mp4` stream
-# URL(s) into `content` while keeping our custom rich embed (with the video `thumbnail_url`, tweet
-# text, stats, and category badge) in `embeds`. Discord's client renders direct `.mp4` links as a
-# clean native inline video player right above our rich metadata embed without duplicate text cards.
+# static images. For posts with `"video"` or `"gif"` media, use the canonical `vxtwitter.com`
+# status link in `content` so Discord unfurls BetterTwitFix's native inline video/GIF player while
+# our custom rich embed supplies tweet text, stats, and category metadata.
 
 
 def _build_thread_webhook_url(base_webhook_url: str, thread_id: str) -> str:
@@ -1136,7 +1193,7 @@ def build_discord_webhook_payload(
     if tweet.user_profile_image_url.startswith(("https://", "http://")):
         author_obj["icon_url"] = tweet.user_profile_image_url
 
-    badge_text = f"`{classification.category}` ({classification.confidence:.0%} • classifier-261120)"
+    badge_text = f"`{classification.category}` ({classification.confidence:.0%} • {CLASSIFIER_VERSION})"
     if classification.fallback_reason:
         badge_text += f" *({classification.fallback_reason})*"
 
@@ -1200,9 +1257,9 @@ def build_discord_webhook_payload(
     }
 
     if video_items:
-        video_links = [m.url for m in video_items[:4] if m.url.startswith(("https://", "http://"))]
-        if video_links:
-            payload["content"] = _truncate("\n".join(video_links), 2000)
+        handle = tweet.user_screen_name.strip().lstrip("@") or "i"
+        payload["content"] = f"https://vxtwitter.com/{handle}/status/{tweet.tweet_id} Category: {badge_text}"
+        payload["embeds"] = None
 
     return payload
 
@@ -1210,10 +1267,11 @@ def build_discord_webhook_payload(
 async def send_discord_tweet_link(
     http_client: httpx.AsyncClient,
     webhook_url: str,
+    thread_id: str,
     tweet_url: str,
 ) -> None:
     resp = await http_client.post(
-        webhook_url,
+        _build_thread_webhook_url(webhook_url, thread_id),
         json={"content": tweet_url},
         timeout=20.0,
     )
@@ -1338,6 +1396,7 @@ class LikeRouterPipeline:
         self.classifier = TweetClassifier(
             api_key=config.gemini_api_key,
             confidence_threshold=config.confidence_threshold,
+            second_category_confidence_threshold=config.second_category_confidence_threshold,
             image_resolution=config.gemini_image_resolution,
         )
         self.http_client = httpx.AsyncClient(follow_redirects=True)
@@ -1379,6 +1438,7 @@ class LikeRouterPipeline:
             #         confidence=0.0,
             #         status="unavailable",
             #         tweet_url=f"https://x.com/i/status/{clean_id}",
+            #         classifier_version=CLASSIFIER_VERSION,
             #     )
             #     return "unavailable"
             except Exception as exc:
@@ -1388,9 +1448,18 @@ class LikeRouterPipeline:
                     clean_id,
                     exc,
                 )
+                self.store.mark_processed(
+                    tweet_id=clean_id,
+                    category="",
+                    confidence=0.0,
+                    status="failed",
+                    tweet_url=tweet_url,
+                    classifier_version=CLASSIFIER_VERSION,
+                )
                 await send_discord_tweet_link(
                     http_client=self.http_client,
                     webhook_url=self.config.discord_webhook_url,
+                    thread_id=self.config.thread_ids["failed-to-fetch"],
                     tweet_url=tweet_url,
                 )
                 return "posted"
@@ -1414,6 +1483,7 @@ class LikeRouterPipeline:
                 confidence=classification.confidence,
                 status="posted",
                 tweet_url=tweet.tweet_url,
+                classifier_version=CLASSIFIER_VERSION,
             )
             logger.info(
                 "Routed tweet_id=%s (@%s) -> %s (confidence=%.0f%%)",

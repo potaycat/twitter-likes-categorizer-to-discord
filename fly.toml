@@ -8,6 +8,8 @@ primary_region = "sin"
   HOST = "0.0.0.0"
   PORT = "8000"
   DB_PATH = "/data/likes.db"
+  CONFIDENCE_THRESHOLD = "0.55"
+  SECOND_CATEGORY_CONFIDENCE_THRESHOLD = "0.55"
   PUBLIC_WEBHOOK_URL = "https://reeeon-twitter-forwarder.fly.dev/webhook/x"
 
 [http_service]
