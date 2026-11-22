@@ -688,7 +688,7 @@ async def fetch_tweet_from_vxtwitter(
     http_client: httpx.AsyncClient,
     api_base: str,
     tweet_id: str,
-    max_attempts: int = 4,
+    max_attempts: int = 3,
 ) -> ExtractedTweet:
     url = f"{api_base}/i/status/{tweet_id}"
     last_exc: Exception | None = None
@@ -845,6 +845,168 @@ async def fetch_tweet_from_vxtwitter(
     raise TweetFetchError(
         f"Exhausted {max_attempts} attempts fetching tweet {tweet_id} from BetterTwitFix"
     ) from last_exc
+
+
+async def fetch_tweet_from_official_api(
+    http_client: httpx.AsyncClient,
+    config: AppConfig,
+    tweet_id: str,
+) -> ExtractedTweet:
+    """Fetch one tweet from the official X API. This function makes exactly one request."""
+    params = {
+        "tweet.fields": "created_at,entities,public_metrics",
+        "expansions": "author_id,attachments.media_keys",
+        "media.fields": "type,url,preview_image_url,alt_text",
+        "user.fields": "name,username,profile_image_url",
+    }
+    url = f"{X_API_BASE}/2/tweets/{quote(tweet_id, safe='')}"
+
+    if config.x_bearer_token:
+        headers = {
+            "Authorization": f"Bearer {config.x_bearer_token}",
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        }
+    elif all(
+        (
+            config.x_consumer_key,
+            config.x_consumer_secret,
+            config.x_access_token,
+            config.x_access_token_secret,
+        )
+    ):
+        request_url = f"{url}?{urlencode(params)}"
+        headers = {
+            "Authorization": build_oauth1_authorization_header(
+                "GET",
+                request_url,
+                config.x_consumer_key,
+                config.x_consumer_secret,
+                config.x_access_token,
+                config.x_access_token_secret,
+            ),
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        }
+    else:
+        raise TweetFetchError(
+            "Official X API fallback is unavailable: configure X_BEARER_TOKEN or OAuth 1.0a credentials"
+        )
+
+    request_url = f"{url}?{urlencode(params)}"
+    try:
+        resp = await http_client.get(request_url, headers=headers, timeout=20.0)
+    except httpx.HTTPError as exc:
+        raise TweetFetchError(f"Official X API network error for tweet {tweet_id}: {exc}") from exc
+
+    if resp.status_code == 404:
+        raise TweetUnavailableError(f"Tweet {tweet_id} not found by the official X API")
+    if resp.status_code >= 400:
+        raise TweetFetchError(
+            f"Official X API returned HTTP {resp.status_code} for tweet {tweet_id}: {resp.text[:300]}"
+        )
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise TweetFetchError(f"Official X API returned non-JSON data for tweet {tweet_id}") from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise TweetFetchError(f"Official X API returned no tweet data for {tweet_id}")
+
+    includes = payload.get("includes") if isinstance(payload, dict) else {}
+    includes = includes if isinstance(includes, dict) else {}
+
+    users = includes.get("users", [])
+    author_id = str(data.get("author_id") or "")
+    author = next(
+        (
+            user
+            for user in users
+            if isinstance(user, dict) and str(user.get("id") or "") == author_id
+        ),
+        {},
+    )
+    user_screen_name = str(author.get("username") or "unknown").strip().lstrip("@")
+    user_name = str(author.get("name") or user_screen_name or "Unknown").strip()
+    profile_img = str(author.get("profile_image_url") or "").strip()
+
+    date_epoch: int | None = None
+    created_at = str(data.get("created_at") or "").strip()
+    if created_at:
+        try:
+            date_epoch = int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError, OverflowError):
+            date_epoch = None
+
+    metrics = data.get("public_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    hashtags: list[str] = []
+    entities = data.get("entities")
+    if isinstance(entities, dict):
+        raw_hashtags = entities.get("hashtags")
+        if isinstance(raw_hashtags, list):
+            hashtags = [
+                str(tag.get("tag") or "").strip().lstrip("#")
+                for tag in raw_hashtags
+                if isinstance(tag, dict) and str(tag.get("tag") or "").strip()
+            ]
+
+    media_by_key: dict[str, dict[str, Any]] = {}
+    raw_media = includes.get("media", [])
+    if isinstance(raw_media, list):
+        for item in raw_media:
+            if isinstance(item, dict) and item.get("media_key"):
+                media_by_key[str(item["media_key"])] = item
+
+    media_urls: list[str] = []
+    media_extended: list[MediaItem] = []
+    attachments = data.get("attachments")
+    if isinstance(attachments, dict):
+        media_keys = attachments.get("media_keys")
+        if isinstance(media_keys, list):
+            for media_key in media_keys:
+                item = media_by_key.get(str(media_key))
+                if not item:
+                    continue
+                media_type = str(item.get("type") or "photo").strip().lower()
+                media_url = str(item.get("url") or "").strip()
+                if not media_url:
+                    media_url = str(item.get("preview_image_url") or "").strip()
+                if not media_url:
+                    continue
+
+                normalized_type = "gif" if media_type == "animated_gif" else (
+                    "video" if media_type == "video" else "image"
+                )
+                media_urls.append(media_url)
+                media_extended.append(
+                    MediaItem(
+                        media_type=normalized_type,
+                        url=media_url,
+                        thumbnail_url=str(item.get("preview_image_url") or "").strip(),
+                        alt_text=str(item.get("alt_text") or "").strip(),
+                    )
+                )
+
+    tweet_url = f"https://x.com/{user_screen_name}/status/{tweet_id}"
+    return ExtractedTweet(
+        tweet_id=tweet_id,
+        text=str(data.get("text") or ""),
+        user_name=user_name,
+        user_screen_name=user_screen_name,
+        user_profile_image_url=profile_img,
+        tweet_url=tweet_url,
+        date_epoch=date_epoch,
+        likes=_safe_int(metrics.get("like_count"), 0),
+        retweets=_safe_int(metrics.get("retweet_count"), 0),
+        replies=_safe_int(metrics.get("reply_count"), 0),
+        hashtags=hashtags,
+        media_urls=media_urls,
+        media_extended=media_extended,
+    )
 
 
 async def download_media_images_for_gemini(
@@ -1088,13 +1250,18 @@ class TweetClassifier:
                                     raw_choice=second_choice,
                                     fallback_reason="",
                                 )
-                            
                             return ClassificationResult(
                                 category="other",
                                 confidence=confidence,
                                 raw_choice="other",
                                 fallback_reason="",
                             )
+                if confidence < self.confidence_threshold:
+                    return ClassificationResult(
+                        category="other",
+                        confidence=confidence,
+                        raw_choice="other",
+                    )
 
                 return ClassificationResult(
                     category=raw_choice,
@@ -1113,7 +1280,7 @@ class TweetClassifier:
                         category="nsfw",
                         confidence=0.0,
                         raw_choice="nsfw",
-                        fallback_reason="prohibited_content",
+                        fallback_reason="",
                     )
 
                 last_exc = exc
@@ -1442,27 +1609,40 @@ class LikeRouterPipeline:
             #     )
             #     return "unavailable"
             except Exception as exc:
-                tweet_url = f"https://x.com/i/status/{clean_id}"
-                logger.warning(
-                    "Tweet %s could not be fetched; sending link to Discord (%s)",
-                    clean_id,
-                    exc,
-                )
-                self.store.mark_processed(
-                    tweet_id=clean_id,
-                    category="",
-                    confidence=0.0,
-                    status="failed",
-                    tweet_url=tweet_url,
-                    classifier_version=CLASSIFIER_VERSION,
-                )
-                await send_discord_tweet_link(
-                    http_client=self.http_client,
-                    webhook_url=self.config.discord_webhook_url,
-                    thread_id=self.config.thread_ids["failed-to-fetch"],
-                    tweet_url=tweet_url,
-                )
-                return "posted"
+                try:
+                    tweet = await fetch_tweet_from_official_api(
+                        self.http_client,
+                        self.config,
+                        clean_id,
+                    )
+                    logger.info(
+                        "Tweet %s fetched successfully from the official X API after BetterTwitFix failed",
+                        clean_id,
+                    )
+                except Exception as fallback_exc:
+                    tweet_url = f"https://x.com/i/status/{clean_id}"
+                    logger.warning(
+                        "Tweet %s could not be fetched from BetterTwitFix or the official X API; "
+                        "sending link to Discord (BetterTwitFix: %s; official X API: %s)",
+                        clean_id,
+                        exc,
+                        fallback_exc,
+                    )
+                    self.store.mark_processed(
+                        tweet_id=clean_id,
+                        category="",
+                        confidence=0.0,
+                        status="failed",
+                        tweet_url=tweet_url,
+                        classifier_version=CLASSIFIER_VERSION,
+                    )
+                    await send_discord_tweet_link(
+                        http_client=self.http_client,
+                        webhook_url=self.config.discord_webhook_url,
+                        thread_id=self.config.thread_ids["failed-to-fetch"],
+                        tweet_url=tweet_url,
+                    )
+                    return "error"
 
             images, media_failed = await download_media_images_for_gemini(
                 self.http_client, tweet
